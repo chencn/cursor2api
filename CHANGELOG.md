@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.5.4 (2026-03-11)
+
+### 🌐 内网代理支持 (Issue #17)
+
+- **修复 `fetch failed`**：Node.js 原生 `fetch()` 不读取 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，内网用户设置这些变量后请求仍然直连失败
+- **新增 `proxy-agent.ts`**：使用 `undici.ProxyAgent` 作为 fetch dispatcher，所有外发请求（Cursor API、Vision API）均可通过 HTTP 代理转发
+- **配置方式**：在 `config.yaml` 中设置 `proxy` 字段，或通过 `PROXY` 环境变量指定（支持 `http://用户名:密码@代理:端口` 格式）
+- **单元测试**：新增 16 个测试用例覆盖代理模块的核心逻辑
+
+---
 ## v2.5.3 (2026-03-11)
 
 ### 🗜️ Schema 压缩 — 根治截断问题
