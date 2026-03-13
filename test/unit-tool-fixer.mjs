@@ -17,10 +17,7 @@ const SMART_SINGLE_QUOTES = new Set([
 
 function normalizeToolArguments(args) {
     if (!args || typeof args !== 'object') return args;
-    if ('file_path' in args && !('path' in args)) {
-        args.path = args.file_path;
-        delete args.file_path;
-    }
+    // Removed legacy file_path to path conversion
     return args;
 }
 
@@ -69,19 +66,19 @@ function assertEqual(a, b, msg) {
 // ════════════════════════════════════════════════════════════════════
 console.log('\n📦 [1] normalizeToolArguments — 字段名映射\n');
 
-test('file_path → path 映射', () => {
+test('file_path不再隐式转为path', () => {
     const args = { file_path: 'src/index.ts', content: 'hello' };
     const result = normalizeToolArguments(args);
-    assertEqual(result.path, 'src/index.ts');
-    assert(!('file_path' in result), 'file_path 应被删除');
-    assertEqual(result.content, 'hello', 'content 不应被修改');
+    assertEqual(result.file_path, 'src/index.ts', '应保留原始 file_path');
+    assert(!('path' in result), '不应自动生成 path');
+    assertEqual(result.content, 'hello');
 });
 
-test('已有 path 字段时不覆盖', () => {
+test('同时存在时保持不变', () => {
     const args = { file_path: 'old.ts', path: 'new.ts' };
     const result = normalizeToolArguments(args);
-    assertEqual(result.path, 'new.ts', '应保留原始 path');
-    assert('file_path' in result, 'file_path 应保留');
+    assertEqual(result.path, 'new.ts');
+    assert('file_path' in result);
 });
 
 test('无 file_path 时不影响', () => {
@@ -145,17 +142,17 @@ test('代码中的智能引号修复', () => {
 // ════════════════════════════════════════════════════════════════════
 console.log('\n📦 [3] fixToolCallArguments — 综合修复\n');
 
-test('Read 工具: file_path → path', () => {
+test('Read 工具: file_path 保持 file_path', () => {
     const args = { file_path: 'src/main.ts' };
     const result = fixToolCallArguments('Read', args);
-    assertEqual(result.path, 'src/main.ts');
-    assert(!('file_path' in result));
+    assertEqual(result.file_path, 'src/main.ts');
+    assert(!('path' in result));
 });
 
-test('Write 工具: file_path + content 完整修复', () => {
+test('Write 工具: file_path + content 保持不被截断', () => {
     const args = { file_path: 'test.ts', content: 'console.log("hello")' };
     const result = fixToolCallArguments('Write', args);
-    assertEqual(result.path, 'test.ts');
+    assertEqual(result.file_path, 'test.ts');
     assertEqual(result.content, 'console.log("hello")');
 });
 
@@ -217,7 +214,7 @@ function parseToolCallsWithFix(responseText) {
     return { toolCalls, cleanText: cleanText.trim() };
 }
 
-test('解析含 file_path 的工具调用 → 自动修复为 path', () => {
+test('解析含 file_path 的工具调用 → 保持为 file_path', () => {
     const text = `I'll read the file now.
 
 \`\`\`json action
@@ -231,11 +228,11 @@ test('解析含 file_path 的工具调用 → 自动修复为 path', () => {
     const { toolCalls } = parseToolCallsWithFix(text);
     assertEqual(toolCalls.length, 1);
     assertEqual(toolCalls[0].name, 'Read');
-    assertEqual(toolCalls[0].arguments.path, 'src/index.ts');
-    assert(!('file_path' in toolCalls[0].arguments), 'file_path 应被删除');
+    assertEqual(toolCalls[0].arguments.file_path, 'src/index.ts');
+    assert(!('path' in toolCalls[0].arguments), '不应生成 path');
 });
 
-test('多个工具调用全部修复', () => {
+test('多个工具调用不再强转', () => {
     const text = `\`\`\`json action
 {"tool":"Read","parameters":{"file_path":"a.ts"}}
 \`\`\`
@@ -245,8 +242,8 @@ test('多个工具调用全部修复', () => {
 \`\`\``;
     const { toolCalls } = parseToolCallsWithFix(text);
     assertEqual(toolCalls.length, 2);
-    assertEqual(toolCalls[0].arguments.path, 'a.ts');
-    assertEqual(toolCalls[1].arguments.path, 'b.ts');
+    assertEqual(toolCalls[0].arguments.file_path, 'a.ts');
+    assertEqual(toolCalls[1].arguments.file_path, 'b.ts');
     assertEqual(toolCalls[1].arguments.content, 'hello');
 });
 

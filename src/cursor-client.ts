@@ -11,6 +11,7 @@
 
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
+import { getProxyFetchOptions } from './proxy-agent.js';
 
 const CURSOR_CHAT_API = 'https://cursor.com/api/chat';
 
@@ -36,6 +37,7 @@ function getChromeHeaders(): Record<string, string> {
         'priority': 'u=1, i',
         'user-agent': config.fingerprint.userAgent,
         'x-is-human': '',  // Cursor 不再校验此字段
+        'anthropic-beta': 'max-tokens-3-5-sonnet-2024-07-15'
     };
 }
 
@@ -100,7 +102,8 @@ async function sendCursorRequestInner(
             headers,
             body: JSON.stringify(req),
             signal: controller.signal,
-        });
+            ...getProxyFetchOptions(),
+        } as any);
 
         if (!resp.ok) {
             const body = await resp.text();
