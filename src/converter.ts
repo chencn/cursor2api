@@ -9,6 +9,9 @@
  * 5. 图片预处理 → Anthropic ImageBlockParam 检测与 OCR/视觉 API 降级
  */
 
+import { readFileSync, existsSync } from 'fs';
+import { resolve as pathResolve } from 'path';
+
 import { v4 as uuidv4 } from 'uuid';
 import type {
     AnthropicRequest,
@@ -993,10 +996,87 @@ async function preprocessImages(messages: AnthropicMessage[]): Promise<void> {
         }
     }
 
+    // ★ Phase 1.5: 文本中嵌入的图片 URL/路径提取
+    // OpenClaw/Telegram 等客户端可能将图片路径/URL 嵌入到文本消息中
+    // 例如: "The user sent an image" + 路径引用，或 {{MediaUrl}} 模板变量
+    // 常见格式：
+    //   - 本地文件路径: /Users/.../file.jpg
+    //   - file:// URL: file:///Users/.../file.jpg
+    //   - HTTP(S) URL 以图片后缀结尾
+    const IMAGE_URL_IN_TEXT_RE = /(?:file:\/\/\/?|(?:https?:\/\/)[^\s]+\.(?:jpg|jpeg|png|gif|webp|bmp|svg)(?:\?[^\s]*)?|(?:^|\s)(\/[\w.\/-]+\.(?:jpg|jpeg|png|gif|webp|bmp|svg)))/gi;
+
+    for (const msg of messages) {
+        if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+        const newBlocks: AnthropicContentBlock[] = [];
+        let extractedUrls = 0;
+
+        for (const block of msg.content) {
+            if (block.type !== 'text' || !block.text) {
+                newBlocks.push(block);
+                continue;
+            }
+
+            // 检查文本中是否有图片 URL/路径（仅当该消息没有已有的 image block 时）
+            const hasExistingImages = msg.content.some(b => b.type === 'image');
+            if (hasExistingImages) {
+                newBlocks.push(block);
+                continue;
+            }
+
+            const matches = [...block.text.matchAll(IMAGE_URL_IN_TEXT_RE)];
+            if (matches.length === 0) {
+                newBlocks.push(block);
+                continue;
+            }
+
+            // 提取图片 URL 并创建 image block
+            for (const match of matches) {
+                let url = (match[1] || match[0]).trim();
+                // 清理 file:// 前缀
+                if (url.startsWith('file://')) {
+                    url = url.replace(/^file:\/\/\/?/, '/');
+                }
+
+                if (url.startsWith('/') || url.startsWith('~')) {
+                    // 本地文件路径 → 尝试读取
+                    newBlocks.push({
+                        type: 'image',
+                        source: { type: 'url', media_type: guessMediaType(url), data: url },
+                    } as any);
+                } else if (url.startsWith('http')) {
+                    newBlocks.push({
+                        type: 'image',
+                        source: { type: 'url', media_type: guessMediaType(url), data: url },
+                    } as any);
+                }
+                extractedUrls++;
+            }
+
+            // 保留文本块（但移除其中的图片路径引用，避免模型看到路径后产生混乱）
+            let cleanedText = block.text;
+            for (const match of matches) {
+                cleanedText = cleanedText.replace(match[0], '[image]');
+            }
+            if (cleanedText.trim()) {
+                newBlocks.push({ type: 'text', text: cleanedText });
+            }
+        }
+
+        if (extractedUrls > 0) {
+            console.log(`[Converter] 🔍 从文本中提取了 ${extractedUrls} 个图片 URL/路径`);
+            msg.content = newBlocks as AnthropicContentBlock[];
+        }
+    }
+
     // ★ Phase 2: 统计图片数量 + URL 图片下载转 base64
+    //   支持三种方式：
+    //   a) HTTP(S) URL → fetch 下载
+    //   b) 本地文件路径 (/, ~, file://) → readFileSync 读取
+    //   c) base64 → 直接使用
     let totalImages = 0;
     let urlImages = 0;
     let base64Images = 0;
+    let localImages = 0;
     for (const msg of messages) {
         if (!Array.isArray(msg.content)) continue;
         for (let i = 0; i < msg.content.length; i++) {
@@ -1005,35 +1085,70 @@ async function preprocessImages(messages: AnthropicMessage[]): Promise<void> {
                 totalImages++;
                 // ★ URL 图片处理：远程 URL 需要下载转为 base64（OCR 和 Vision API 均需要）
                 if (block.source?.type === 'url' && block.source.data && !block.source.data.startsWith('data:')) {
-                    urlImages++;
                     const imageUrl = block.source.data;
-                    console.log(`[Converter] 📥 下载远程图片 (${urlImages}): ${imageUrl.substring(0, 100)}...`);
-                    try {
-                        const response = await fetch(imageUrl, {
-                            ...getVisionProxyFetchOptions(),
-                            headers: {
-                                // 部分图片服务（如 Telegram）需要 User-Agent
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                            },
-                        } as any);
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        const buffer = Buffer.from(await response.arrayBuffer());
-                        const contentType = response.headers.get('content-type') || 'image/jpeg';
-                        const mediaType = contentType.split(';')[0].trim();
-                        const base64Data = buffer.toString('base64');
-                        // 替换为 base64 格式
-                        msg.content[i] = {
-                            ...block,
-                            source: { type: 'base64', media_type: mediaType, data: base64Data },
-                        };
-                        console.log(`[Converter] ✅ 图片下载成功: ${mediaType}, ${Math.round(base64Data.length * 0.75 / 1024)}KB`);
-                    } catch (err) {
-                        console.error(`[Converter] ❌ 远程图片下载失败 (${imageUrl.substring(0, 80)}):`, err);
-                        // 下载失败时替换为错误提示文本
-                        msg.content[i] = {
-                            type: 'text',
-                            text: `[Image from URL could not be downloaded: ${(err as Error).message}. URL: ${imageUrl.substring(0, 100)}]`,
-                        } as any;
+
+                    // ★ 本地文件路径检测：/开头 或 ~/ 开头 或 Windows 绝对路径
+                    const isLocalPath = /^(\/|~\/|[A-Za-z]:\\)/.test(imageUrl);
+
+                    if (isLocalPath) {
+                        localImages++;
+                        // 解析本地文件路径
+                        const resolvedPath = imageUrl.startsWith('~/')
+                            ? pathResolve(process.env.HOME || process.env.USERPROFILE || '', imageUrl.slice(2))
+                            : pathResolve(imageUrl);
+
+                        console.log(`[Converter] 📂 读取本地图片 (${localImages}): ${resolvedPath}`);
+                        try {
+                            if (!existsSync(resolvedPath)) {
+                                throw new Error(`File not found: ${resolvedPath}`);
+                            }
+                            const fileBuffer = readFileSync(resolvedPath);
+                            const mediaType = guessMediaType(resolvedPath);
+                            const base64Data = fileBuffer.toString('base64');
+                            msg.content[i] = {
+                                ...block,
+                                source: { type: 'base64', media_type: mediaType, data: base64Data },
+                            };
+                            console.log(`[Converter] ✅ 本地图片读取成功: ${mediaType}, ${Math.round(base64Data.length * 0.75 / 1024)}KB`);
+                        } catch (err) {
+                            console.error(`[Converter] ❌ 本地图片读取失败 (${resolvedPath}):`, err);
+                            // 本地文件读取失败 → 替换为提示文本
+                            msg.content[i] = {
+                                type: 'text',
+                                text: `[Image from local path could not be read: ${(err as Error).message}. The proxy server may not have access to this file. Path: ${imageUrl.substring(0, 150)}]`,
+                            } as any;
+                        }
+                    } else {
+                        // HTTP(S) URL → 网络下载
+                        urlImages++;
+                        console.log(`[Converter] 📥 下载远程图片 (${urlImages}): ${imageUrl.substring(0, 100)}...`);
+                        try {
+                            const response = await fetch(imageUrl, {
+                                ...getVisionProxyFetchOptions(),
+                                headers: {
+                                    // 部分图片服务（如 Telegram）需要 User-Agent
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                },
+                            } as any);
+                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                            const buffer = Buffer.from(await response.arrayBuffer());
+                            const contentType = response.headers.get('content-type') || 'image/jpeg';
+                            const mediaType = contentType.split(';')[0].trim();
+                            const base64Data = buffer.toString('base64');
+                            // 替换为 base64 格式
+                            msg.content[i] = {
+                                ...block,
+                                source: { type: 'base64', media_type: mediaType, data: base64Data },
+                            };
+                            console.log(`[Converter] ✅ 图片下载成功: ${mediaType}, ${Math.round(base64Data.length * 0.75 / 1024)}KB`);
+                        } catch (err) {
+                            console.error(`[Converter] ❌ 远程图片下载失败 (${imageUrl.substring(0, 80)}):`, err);
+                            // 下载失败时替换为错误提示文本
+                            msg.content[i] = {
+                                type: 'text',
+                                text: `[Image from URL could not be downloaded: ${(err as Error).message}. URL: ${imageUrl.substring(0, 100)}]`,
+                            } as any;
+                        }
                     }
                 } else if (block.source?.type === 'base64' && block.source.data) {
                     base64Images++;
@@ -1043,7 +1158,7 @@ async function preprocessImages(messages: AnthropicMessage[]): Promise<void> {
     }
 
     if (totalImages === 0) return;
-    console.log(`[Converter] 📊 图片统计: 总计 ${totalImages} 张 (base64: ${base64Images}, URL下载: ${urlImages})`);
+    console.log(`[Converter] 📊 图片统计: 总计 ${totalImages} 张 (base64: ${base64Images}, URL下载: ${urlImages}, 本地文件: ${localImages})`);
 
     // ★ Phase 3: 调用 vision 拦截器处理（OCR / 外部 API）
     try {

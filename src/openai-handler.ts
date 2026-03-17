@@ -251,7 +251,7 @@ function extractOpenAIContentBlocks(msg: OpenAIMessage): string | AnthropicConte
                         });
                     }
                 } else {
-                    // HTTP(S) URL — 统一存储到 source.data，由 preprocessImages() 下载
+                    // HTTP(S)/local URL — 统一存储到 source.data，由 preprocessImages() 下载/读取
                     blocks.push({
                         type: 'image',
                         source: { type: 'url', media_type: 'image/jpeg', data: url }
@@ -299,12 +299,61 @@ function extractOpenAIContentBlocks(msg: OpenAIMessage): string | AnthropicConte
                         source: { type: 'url', media_type: 'image/jpeg', data: url }
                     });
                 }
+            } else if (p.type === 'image_file' && (p as any).image_file) {
+                // ★ Assistants API 格式: { type: 'image_file', image_file: { file_id: '...', detail?: '...' } }
+                // file_id 无法直接使用，但记录下来以便调试
+                const fileId = (p as any).image_file.file_id;
+                console.log(`[OpenAI] ⚠️ 收到 image_file 格式 (file_id: ${fileId})，此格式需要 Files API 支持`);
+                blocks.push({ type: 'text', text: `[Image file reference: file_id=${fileId}. This format requires Files API support which is not available.]` });
+            } else if ((p.type === 'image_url' || p.type === 'input_image') && (p as any).url) {
+                // ★ 扁平 URL 格式：某些客户端将 url 直接放在顶层而非 image_url.url
+                const url = (p as any).url as string;
+                if (url.startsWith('data:')) {
+                    const match = url.match(/^data:([^;]+);base64,(.+)$/);
+                    if (match) {
+                        blocks.push({
+                            type: 'image',
+                            source: { type: 'base64', media_type: match[1], data: match[2] }
+                        });
+                    }
+                } else {
+                    blocks.push({
+                        type: 'image',
+                        source: { type: 'url', media_type: 'image/jpeg', data: url }
+                    });
+                }
             } else if (p.type === 'tool_use') {
                 // Anthropic 风格 tool_use 块直接透传
                 blocks.push(p as unknown as AnthropicContentBlock);
             } else if (p.type === 'tool_result') {
                 // Anthropic 风格 tool_result 块直接透传
                 blocks.push(p as unknown as AnthropicContentBlock);
+            } else {
+                // ★ 通用兜底：检查未知类型的块是否包含可识别的图片数据
+                const anyP = p as Record<string, unknown>;
+                const possibleUrl = (anyP.url || anyP.file_path || anyP.path ||
+                    (anyP.image_url as any)?.url || anyP.data) as string | undefined;
+                if (possibleUrl && typeof possibleUrl === 'string') {
+                    const looksLikeImage = /\.(jpg|jpeg|png|gif|webp|bmp|svg)/i.test(possibleUrl) ||
+                        possibleUrl.startsWith('data:image/');
+                    if (looksLikeImage) {
+                        console.log(`[OpenAI] 🔄 未知内容类型 "${p.type}" 中检测到图片引用 → 转为 image block`);
+                        if (possibleUrl.startsWith('data:')) {
+                            const match = possibleUrl.match(/^data:([^;]+);base64,(.+)$/);
+                            if (match) {
+                                blocks.push({
+                                    type: 'image',
+                                    source: { type: 'base64', media_type: match[1], data: match[2] }
+                                });
+                            }
+                        } else {
+                            blocks.push({
+                                type: 'image',
+                                source: { type: 'url', media_type: 'image/jpeg', data: possibleUrl }
+                            });
+                        }
+                    }
+                }
             }
         }
         return blocks.length > 0 ? blocks : '';
