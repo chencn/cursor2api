@@ -28,7 +28,7 @@ import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converte
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { createRequestLogger } from './logger.js';
-import { createIncrementalTextStreamer, splitLeadingThinkingBlocks, stripThinkingTags } from './streaming-text.js';
+import { createIncrementalTextStreamer, hasLeadingThinking, splitLeadingThinkingBlocks, stripThinkingTags } from './streaming-text.js';
 import {
     autoContinueCursorToolResponseFull,
     autoContinueCursorToolResponseStream,
@@ -907,7 +907,7 @@ async function handleOpenAIStream(
 
         // ★ Thinking 提取（在拒绝检测之前）
         let reasoningContent: string | undefined = hybridThinkingContent || undefined;
-        if (fullResponse.includes('<thinking>')) {
+        if (hasLeadingThinking(fullResponse)) {
             const { thinkingContent: extracted, strippedText } = extractThinking(fullResponse);
             if (extracted) {
                 if (thinkingEnabled && !reasoningContent) {
@@ -1118,7 +1118,7 @@ async function handleOpenAINonStream(
     // ★ Thinking 提取必须在拒绝检测之前 — 否则 thinking 内容中的关键词会触发 isRefusal 误判
     const thinkingEnabled = anthropicReq.thinking?.type === 'enabled';
     let reasoningContent: string | undefined;
-    if (fullText.includes('<thinking>')) {
+    if (hasLeadingThinking(fullText)) {
         const { thinkingContent: extracted, strippedText } = extractThinking(fullText);
         if (extracted) {
             if (thinkingEnabled) {
@@ -1140,7 +1140,7 @@ async function handleOpenAINonStream(
             activeCursorReq = retryCursorReq;
             fullText = await sendCursorRequestFull(activeCursorReq);
             // 重试响应也需要先剥离 thinking
-            if (fullText.includes('<thinking>')) {
+            if (hasLeadingThinking(fullText)) {
                 fullText = extractThinking(fullText).strippedText;
             }
             if (!shouldRetry()) break;
@@ -1510,7 +1510,7 @@ async function handleResponsesStream(
         await executeStream();
 
         // Thinking 提取
-        if (fullResponse.includes('<thinking>')) {
+        if (hasLeadingThinking(fullResponse)) {
             const { strippedText } = extractThinking(fullResponse);
             fullResponse = strippedText;
         }
@@ -1527,7 +1527,7 @@ async function handleResponsesStream(
             const retryBody = buildRetryRequest(anthropicReq, retryCount - 1);
             activeCursorReq = await convertToCursorRequest(retryBody);
             await executeStream();
-            if (fullResponse.includes('<thinking>')) {
+            if (hasLeadingThinking(fullResponse)) {
                 fullResponse = extractThinking(fullResponse).strippedText;
             }
         }
@@ -1713,7 +1713,7 @@ async function handleResponsesNonStream(
     const hasTools = (anthropicReq.tools?.length ?? 0) > 0;
 
     // Thinking 提取
-    if (fullText.includes('<thinking>')) {
+    if (hasLeadingThinking(fullText)) {
         fullText = extractThinking(fullText).strippedText;
     }
 
@@ -1725,7 +1725,7 @@ async function handleResponsesNonStream(
             const retryCursorReq = await convertToCursorRequest(retryBody);
             activeCursorReq = retryCursorReq;
             fullText = await sendCursorRequestFull(activeCursorReq);
-            if (fullText.includes('<thinking>')) {
+            if (hasLeadingThinking(fullText)) {
                 fullText = extractThinking(fullText).strippedText;
             }
             if (!shouldRetry()) break;

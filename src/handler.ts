@@ -20,7 +20,7 @@ import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converte
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { createRequestLogger, type RequestLogger } from './logger.js';
-import { createIncrementalTextStreamer, splitLeadingThinkingBlocks, stripThinkingTags } from './streaming-text.js';
+import { createIncrementalTextStreamer, hasLeadingThinking, splitLeadingThinkingBlocks, stripThinkingTags } from './streaming-text.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -1072,7 +1072,7 @@ async function handleDirectTextStream(
         hasTools: false,
     });
 
-    if (!finalThinkingContent && finalRawResponse.includes('<thinking>')) {
+    if (!finalThinkingContent && hasLeadingThinking(finalRawResponse)) {
         const { thinkingContent: extracted } = extractThinking(finalRawResponse);
         if (extracted) {
             finalThinkingContent = extracted;
@@ -1360,7 +1360,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         // ★ Thinking 提取（在拒绝检测之前，防止 thinking 内容触发 isRefusal 误判）
         // 混合流式阶段可能已经提取了 thinking，优先使用
         let thinkingContent = hybridThinkingContent || '';
-        if (fullResponse.includes('<thinking>')) {
+        if (hasLeadingThinking(fullResponse)) {
             const { thinkingContent: extracted, strippedText } = extractThinking(fullResponse);
             if (extracted) {
                 if (!thinkingContent) thinkingContent = extracted;
@@ -1393,7 +1393,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
             activeCursorReq = await convertToCursorRequest(retryBody);
             await executeStream(true);  // 重试不传回调（纯缓冲模式）
             // 重试后也需要剥离 thinking 标签
-            if (fullResponse.includes('<thinking>')) {
+            if (hasLeadingThinking(fullResponse)) {
                 const { thinkingContent: retryThinking, strippedText: retryStripped } = extractThinking(fullResponse);
                 if (retryThinking) {
                     thinkingContent = retryThinking;
@@ -1798,7 +1798,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     // ★ Thinking 提取（在拒绝检测之前）
     // 始终剥离 thinking 标签，避免泄漏到最终文本中
     let thinkingContent = '';
-    if (fullText.includes('<thinking>')) {
+    if (hasLeadingThinking(fullText)) {
         const { thinkingContent: extracted, strippedText } = extractThinking(fullText);
         if (extracted) {
             thinkingContent = extracted;
@@ -1826,7 +1826,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
             activeCursorReq = await convertToCursorRequest(retryBody);
             fullText = await sendCursorRequestFull(activeCursorReq);
             // 重试后也需要剥离 thinking 标签
-            if (fullText.includes('<thinking>')) {
+            if (hasLeadingThinking(fullText)) {
                 const { thinkingContent: retryThinking, strippedText: retryStripped } = extractThinking(fullText);
                 if (retryThinking) {
                     thinkingContent = retryThinking;
